@@ -4,7 +4,7 @@
  */
 
 import { useState, FormEvent, useRef, useEffect } from "react";
-import { Sparkles, Calendar, Heart, Send, Loader2, Circle, Flame, Zap, Coffee, AlertCircle, Mic, MicOff, Moon, Sun } from "lucide-react";
+import { Sparkles, Calendar, Heart, Send, Loader2, Circle, Flame, Zap, Coffee, AlertCircle, Mic, MicOff, Moon, Sun, Bot } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
 interface Task {
@@ -14,12 +14,18 @@ interface Task {
   reason: string;
   estimated_minutes: number;
   done?: boolean;
+  age?: number;
 }
 
 interface AiResult {
   energy_level: string;
   next_action: string;
   tasks: Task[];
+}
+
+interface AgentLogEntry {
+  timestamp: string;
+  message: string;
 }
 
 const ENERGY_OPTIONS = [
@@ -52,15 +58,16 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [isListening, setIsListening] = useState(false);
-  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [isDarkMode, setIsDarkMode] = useState(true);
+  const [agentLog, setAgentLog] = useState<AgentLogEntry[]>([]);
 
+  const taskAgeRef = useRef<Record<string, number>>({});
   const recognitionRef = useRef<any>(null);
 
   useEffect(() => {
     window.speechSynthesis.getVoices();
   }, []);
 
-  // Toggle the 'dark' class on the root html element so Tailwind's dark: variants apply
   useEffect(() => {
     if (isDarkMode) {
       document.documentElement.classList.add("dark");
@@ -68,6 +75,30 @@ export default function App() {
       document.documentElement.classList.remove("dark");
     }
   }, [isDarkMode]);
+
+  // Autonomous background agent check — runs periodically without user action,
+  // proactively monitoring tasks for urgency even when the user hasn't asked.
+  useEffect(() => {
+    const runAgentCheck = async () => {
+      try {
+        const res = await fetch("/api/agent-check");
+        if (res.ok) {
+          const data = await res.json();
+          if (data.log) setAgentLog(data.log);
+        }
+      } catch (e) {
+        console.error("Agent check failed:", e);
+      }
+    };
+
+    const initialTimeout = setTimeout(runAgentCheck, 5000);
+    const interval = setInterval(runAgentCheck, 180000);
+
+    return () => {
+      clearTimeout(initialTimeout);
+      clearInterval(interval);
+    };
+  }, []);
 
   const calculateTimeline = (tasks: Task[]) => {
     const now = new Date();
@@ -86,6 +117,12 @@ export default function App() {
     });
   };
 
+  const bumpTaskAges = (tasks: Task[]) => {
+    tasks.forEach((t) => {
+      taskAgeRef.current[t.title] = (taskAgeRef.current[t.title] || 0) + 1;
+    });
+  };
+
   const fetchPlan = async (inputText: string) => {
     setIsLoading(true);
     setError("");
@@ -101,7 +138,11 @@ export default function App() {
 
       const data: AiResult = await res.json();
       data.tasks.sort((a, b) => a.priority_rank - b.priority_rank);
+
+      data.tasks = data.tasks.map((t) => ({ ...t, age: taskAgeRef.current[t.title] || 0 }));
+
       setResult(data);
+      bumpTaskAges(data.tasks);
     } catch (err) {
       setError("Something went wrong. Please try again.");
       console.error(err);
@@ -125,6 +166,9 @@ export default function App() {
   const markTaskDone = (index: number) => {
     if (!result) return;
 
+    const completedTask = result.tasks[index];
+    delete taskAgeRef.current[completedTask.title];
+
     const remainingTasks = result.tasks.filter((_, i) => i !== index);
 
     if (remainingTasks.length === 0) {
@@ -132,11 +176,19 @@ export default function App() {
       return;
     }
 
+    const ageInfo = remainingTasks
+      .map((t) => {
+        const age = taskAgeRef.current[t.title] || 0;
+        return age > 0 ? `"${t.title}" has been carried over ${age} time(s) without completion.` : null;
+      })
+      .filter(Boolean)
+      .join(" ");
+
     const remainingDescription = remainingTasks
       .map((t) => `${t.title}${t.deadline ? ` (deadline: ${t.deadline})` : ""}`)
       .join(", ");
 
-    const followUpInput = `I just completed "${result.tasks[index].title}". My remaining tasks are: ${remainingDescription}. My energy level is still ${result.energy_level}. Please re-prioritize.`;
+    const followUpInput = `I just completed "${completedTask.title}". My remaining tasks are: ${remainingDescription}. My energy level is still ${result.energy_level}.${ageInfo ? ` [TASK AGE INFO] ${ageInfo}` : ""} Please re-prioritize.`;
 
     fetchPlan(followUpInput);
   };
@@ -239,7 +291,6 @@ export default function App() {
 
   return (
     <div id="app-container" className="min-h-screen bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 font-sans flex flex-col justify-between transition-colors duration-300">
-      {/* Header */}
       <header id="app-header" className="border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md sticky top-0 z-10">
         <div className="max-w-3xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -258,7 +309,6 @@ export default function App() {
               Gemini Connected
             </div>
 
-            {/* Dark / Light mode toggle */}
             <motion.button
               whileTap={{ scale: 0.9 }}
               onClick={() => setIsDarkMode((prev) => !prev)}
@@ -281,9 +331,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Content */}
       <main id="main-content" className="flex-grow max-w-3xl w-full mx-auto px-4 py-8 md:py-12 flex flex-col gap-8">
-        {/* Intro Card */}
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -300,7 +348,32 @@ export default function App() {
           </p>
         </motion.div>
 
-        {/* Energy Selector */}
+        {/* Autonomous Agent Activity Log — shown globally, not just inside result */}
+        {agentLog.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-2xl p-5 flex flex-col gap-3"
+          >
+            <div className="flex items-center gap-2">
+              <Bot className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+              <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider">
+                Autonomous Agent Activity
+              </span>
+            </div>
+            <div className="flex flex-col gap-2 max-h-40 overflow-y-auto">
+              {agentLog.slice(0, 5).map((entry, i) => (
+                <div key={`log-${i}-${entry.timestamp}`} className="text-xs text-slate-700 dark:text-slate-300 flex gap-2">
+                  <span className="text-slate-400 dark:text-slate-500 flex-shrink-0">
+                    {new Date(entry.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                  <span>{entry.message}</span>
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -334,7 +407,6 @@ export default function App() {
           </div>
         </motion.div>
 
-        {/* Input Form */}
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -395,7 +467,6 @@ export default function App() {
           </form>
         </motion.div>
 
-        {/* Results Section */}
         <AnimatePresence>
           {error && (
             <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-sm text-red-500 dark:text-red-400 text-center">
@@ -409,7 +480,6 @@ export default function App() {
               animate={{ opacity: 1, y: 0 }}
               className="flex flex-col gap-4"
             >
-              {/* Next Action / Voice card */}
               <div className="bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-800 rounded-2xl p-5 flex flex-col gap-3">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-indigo-600 dark:text-indigo-400 uppercase tracking-wider">
@@ -427,9 +497,34 @@ export default function App() {
                 <p className="text-sm text-slate-700 dark:text-slate-200 leading-relaxed">{result.next_action}</p>
               </div>
 
-              {/* Task Timeline */}
               {result.tasks.length > 0 && (
                 <div className="flex flex-col gap-1">
+                  {/* ✅ Autonomous Agent Activity Log — now placed above timeline */}
+                  {agentLog.length > 0 && (
+                    <motion.div
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-2xl p-5 flex flex-col gap-3 mb-3"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Bot className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                        <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider">
+                          Autonomous Agent Activity
+                        </span>
+                      </div>
+                      <div className="flex flex-col gap-2 max-h-40 overflow-y-auto">
+                        {agentLog.slice(0, 5).map((entry, i) => (
+                          <div key={`log-inline-${i}-${entry.timestamp}`} className="text-xs text-slate-700 dark:text-slate-300 flex gap-2">
+                            <span className="text-slate-400 dark:text-slate-500 flex-shrink-0">
+                              {new Date(entry.timestamp).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
+                            </span>
+                            <span>{entry.message}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </motion.div>
+                  )}
+
                   <div className="flex items-center justify-between px-1 mb-1">
                     <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200">Today's Timeline</h3>
                     <motion.button
@@ -463,6 +558,11 @@ export default function App() {
                         <div className="flex items-center gap-2">
                           <span className="text-xs font-bold text-indigo-500 dark:text-indigo-400">#{task.priority_rank}</span>
                           <h4 className="font-semibold text-slate-800 dark:text-slate-100 text-sm">{task.title}</h4>
+                          {task.age && task.age > 0 ? (
+                            <span className="text-[10px] bg-amber-100 dark:bg-amber-950/50 text-amber-700 dark:text-amber-400 px-2 py-0.5 rounded-full font-medium">
+                              carried over {task.age}x
+                            </span>
+                          ) : null}
                           <span className="text-xs text-slate-400 dark:text-slate-500 ml-auto">{task.estimated_minutes} min</span>
                         </div>
                         <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{task.reason}</p>
@@ -476,7 +576,6 @@ export default function App() {
         </AnimatePresence>
       </main>
 
-      {/* Footer */}
       <footer className="border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 py-6 mt-12 text-center text-xs text-slate-400 dark:text-slate-500">
         <div className="max-w-3xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-4">
           <p>&copy; 2026 DailyMate. Built with care.</p>
