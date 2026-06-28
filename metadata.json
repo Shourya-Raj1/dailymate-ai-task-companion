@@ -1,0 +1,8 @@
+{
+  "name": "DailyMate",
+  "description": "A basic daily helper app that serves as a task and emotional log companion, designed for future AI integration.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
